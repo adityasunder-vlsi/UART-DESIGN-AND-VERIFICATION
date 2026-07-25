@@ -58,38 +58,27 @@ generator → (mailbox) → driver → DUT → monitor → (mailbox) → scorebo
 
 *(insert waveform screenshot here, e.g. `![waveform](waveform.png)`)*
 
-The waveform (captured in EPWave) is grouped into three signal sets:
+The waveform below (captured in EPWave, zoomed to `~15M – ~80M ps`) shows the core interface signals only — `clk, dintx[7:0], donerx, donetx, doutrx[7:0], newd, rx, tx, state[1:0]` — giving a clean view of one full **read** transaction followed by one full **write** transaction.
 
-| Group | Belongs to | Key signals |
-|---|---|---|
-| Top-level interface | `uart_if` | `dintx, donerx, donetx, doutrx, newd, rst, rx, tx` |
-| RX internals | `uartrx` | `count, counts, done, rst, rx, rxdata, state, uclk` |
-| TX internals | `uarttx` | `count, counts, din, donetx, newd, rst, state, tx` |
+**Read (RX) transaction (~15M – ~30M ps):**
+- `rx` toggles as random serial bits arrive.
+- `doutrx[7:0]` visibly shifts through intermediate values (`80, 40, a0, 50, a8, d4, ea`) before settling at `00` — this is the receiver's shift register updating bit-by-bit: `rxdata <= {rx, rxdata[7:1]}`.
+- `donerx` pulses high once all 8 bits are received, marking transaction completion — this is the exact point the monitor samples `doutrx` and forwards it to the scoreboard.
 
-**Reset phase (0 – ~10,000,000 ps):** `rst = 1`; internal regs (`donetx`, `din`, `counts`, `state`) show as X (uninitialized) until the first baud clock edge, matching `driver::reset()` holding reset for 5 `uclk` cycles.
+**Write (TX) transaction (~35M – ~50M ps):**
+- `dintx[7:0]` loads the generator's randomized byte (`3b`).
+- `newd` pulses high for one cycle — the driver's "start transmit" strobe.
+- `tx` begins toggling, serializing `3b` bit-by-bit onto the line.
+- `donetx` pulses high on completion, confirming the byte was fully transmitted.
 
-**Reset released (~10M ps):** `rx = 1`, `tx = 1` (idle-high, correct for UART), both FSMs sit in `state = 0` (idle).
-
-**RX (read) transaction (~10M – ~40M ps):**
-- `rx` pulled low → RX FSM moves `idle → start`.
-- `counts` increments `001…008`, driving the 8-bit shift-in loop.
-- `rxdata`/`doutrx` visibly rotate (`80, 40, a0, 50, a8, d4, ea, 00`) as each new bit shifts in: `rxdata <= {rx, rxdata[7:1]}`.
-- `donerx` pulses once transaction completes → FSM returns to idle; the monitor captures the final `doutrx` value for the scoreboard.
-
-**TX (write) transaction (~40M ps onward):**
-- `dintx`/`din` latch the generator's randomized byte (`3b`).
-- `newd` pulses high for one `uclk` — driver's "start send" strobe.
-- TX FSM: `state 0 (idle) → 2 (transfer)`, matching the enum encoding `transfer = 2'b10`.
-- `counts` increments `001…008` while `tx` serializes `din[counts]` bit by bit.
-- `donetx` pulses high on completion (~60–65M ps), `tx` returns to idle, `state → 0`.
-- Immediately after, `doutrx` starts changing again (`80, c0…`) — the next RX transaction begins.
+**Next read begins (~65M ps onward):**
+- `doutrx[7:0]` starts shifting again (`80, c0, 60, b0, 58, ac, 56`) — a new randomized read transaction, confirming the testbench correctly loops through back-to-back transactions without stalling.
 
 **What this confirms:**
-- ✅ Correct baud-rate clock generation (`uclk` toggling from `count`/`counts` division)
-- ✅ TX FSM `idle → transfer → idle` with correct `donetx` timing
-- ✅ RX FSM `idle → start → idle` with correct `donerx` timing
-- ✅ Serial-to-parallel and parallel-to-serial conversion both verified against driven data
-- ✅ Full TX and RX transactions captured end-to-end, ready for scoreboard comparison
+- ✅ Correct serial-to-parallel conversion on receive (`rx → doutrx`)
+- ✅ Correct parallel-to-serial conversion on transmit (`dintx → tx`)
+- ✅ `donerx`/`donetx` completion flags asserted at the correct cycle
+- ✅ Back-to-back randomized transactions handled correctly with no protocol violations
 
 ## ▶️ How to Run
 
